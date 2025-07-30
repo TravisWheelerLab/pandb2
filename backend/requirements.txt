@@ -1,0 +1,11 @@
+fastapi[standard]
+gunicorn
+httptools
+peewee
+psycopg2-binary
+pymongo
+python-dotenv
+python-irodsclient
+rich
+uvicorn
+uvloop
