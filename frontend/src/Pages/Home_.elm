@@ -7,7 +7,7 @@ import FormatNumber
 import FormatNumber.Locales exposing (Decimals(..), usLocale)
 import Html
 import Html.Attributes exposing (attribute, class, height, href, selected, src)
-import Html.Events exposing (onInput)
+import Html.Events exposing (onClick, onInput)
 import Http
 import Json.Decode as Decode exposing (Decoder, int, list, nullable, string)
 import Json.Decode.Pipeline exposing (optional, required)
@@ -42,7 +42,7 @@ type alias Model =
     , errorMessage : Maybe String
     , primaryTable : String
     , linkOptions : List String
-    , primaryTableLink : Maybe String
+    , joinColumn : Maybe String
     , additionalTableOptions : List String
     , additionalTables : List String
     , data : List Data
@@ -60,7 +60,7 @@ initialModel =
     , errorMessage = Nothing
     , primaryTable = ""
     , linkOptions = []
-    , primaryTableLink = Nothing
+    , joinColumn = Nothing
     , additionalTableOptions = []
     , additionalTables = []
     , data = []
@@ -93,6 +93,7 @@ decoderValueType =
         , Decode.map BoolValue Decode.bool
         , Decode.map FloatValue Decode.float
         , Decode.map IntValue Decode.int
+        , Decode.map StringValue (Decode.null "NA")
         ]
 
 
@@ -141,11 +142,12 @@ init () =
 
 
 type Msg
-    = AddOtherTable String
-    | GotData (Result Http.Error DataResult)
+    = GotData (Result Http.Error DataResult)
     | GotDataDictionary (Result Http.Error (List DataDictionary))
     | RequestData
     | RequestDataDictionary
+    | RemoveAdditionalTable String
+    | SetAdditionalTable String
     | SetErrorMessage (Maybe String)
     | SetPrimaryTable String
     | SetPrimaryTableLink String
@@ -156,15 +158,6 @@ type Msg
 update : Shared.Model -> Msg -> Model -> ( Model, Effect Msg )
 update shared msg model =
     case msg of
-        AddOtherTable tableName ->
-            ( { model
-                | additionalTables =
-                    List.Extra.unique <|
-                        List.append model.additionalTables [ tableName ]
-              }
-            , Effect.none
-            )
-
         GotData (Ok result) ->
             ( { model
                 | data = result.results
@@ -218,6 +211,23 @@ update shared msg model =
         RequestDataDictionary ->
             ( model, requestDataDictionary shared model )
 
+        RemoveAdditionalTable tableName ->
+            ( { model
+                | additionalTables =
+                    List.filter ((/=) tableName) model.additionalTables
+              }
+            , Effect.sendMsg RequestData
+            )
+
+        SetAdditionalTable tableName ->
+            ( { model
+                | additionalTables =
+                    List.Extra.unique <|
+                        List.append model.additionalTables [ tableName ]
+              }
+            , Effect.sendMsg RequestData
+            )
+
         SetErrorMessage newErrorMessage ->
             ( { model | errorMessage = newErrorMessage }, Effect.none )
 
@@ -233,7 +243,7 @@ update shared msg model =
                         model.dataDictionary
                         |> List.map .fieldLabel
 
-                ( additionalTableOptions, primaryTableLink ) =
+                ( additionalTableOptions, joinColumn ) =
                     case linkOptions of
                         -- If there's just one linkField,
                         -- go ahead and find the other tables
@@ -264,7 +274,7 @@ update shared msg model =
             in
             ( { model
                 | primaryTable = newMainTable
-                , primaryTableLink = primaryTableLink
+                , joinColumn = joinColumn
                 , linkOptions = linkOptions
                 , additionalTableOptions = additionalTableOptions
                 , additionalTables = additionalTables
@@ -295,7 +305,7 @@ update shared msg model =
                             []
             in
             ( { model
-                | primaryTableLink = Just linkField
+                | joinColumn = Just linkField
                 , additionalTableOptions = additionalTableOptions
                 , additionalTables = additionalTables
               }
@@ -341,12 +351,15 @@ update shared msg model =
 requestData : Shared.Model -> Model -> Effect Msg
 requestData shared model =
     let
-        primaryTable =
+        actualTableName tableAlias =
             List.filter
-                (\dd -> dd.alias == model.primaryTable)
+                (\dd -> dd.alias == tableAlias)
                 model.dataDictionary
                 |> List.map .tableName
                 |> List.head
+
+        primaryTable =
+            actualTableName model.primaryTable
 
         offset =
             if model.pageNumber > 1 then
@@ -364,6 +377,14 @@ requestData shared model =
         limit =
             "&limit="
                 ++ String.fromInt model.pageSize
+
+        joinCol =
+            "&join_col=" ++ Maybe.withDefault "" model.joinColumn
+
+        additionalTables =
+            "&additional_tables="
+                ++ String.join ","
+                    (List.filterMap actualTableName model.additionalTables)
     in
     case primaryTable of
         Just tableName ->
@@ -374,6 +395,8 @@ requestData shared model =
                             ++ "/get_data"
                             ++ "?primary_table="
                             ++ tableName
+                            ++ joinCol
+                            ++ additionalTables
                             ++ offset
                             ++ limit
                     , expect = Http.expectJson GotData decodeDataResult
@@ -444,7 +467,7 @@ view model =
                             Html.option [ selected (model.pageSize == num) ]
                                 [ Html.text (String.fromInt num) ]
                         )
-                        [ 10, 25, 50, 100 ]
+                        [ 10, 25, 50, 100, 500 ]
             in
             Html.div [ class "control" ]
                 [ Html.p [ class "heading" ] [ Html.text "Show:" ]
@@ -491,7 +514,8 @@ view model =
                             Html.text "No links"
 
                         1 ->
-                            Html.text (Maybe.withDefault "" (List.head model.linkOptions))
+                            Html.text
+                                (Maybe.withDefault "" (List.head model.linkOptions))
 
                         _ ->
                             Html.select [ class "select", onInput SetPrimaryTableLink ] <|
@@ -517,7 +541,7 @@ view model =
                         Html.text "No other tables"
 
                     else
-                        Html.select [ class "select", onInput AddOtherTable ] <|
+                        Html.select [ class "select", onInput SetAdditionalTable ] <|
                             List.concat
                                 [ [ blank ]
                                 , List.map mkOption model.additionalTableOptions
@@ -582,11 +606,41 @@ view model =
                     ]
                 ]
 
+        additionalTables =
+            if List.isEmpty model.additionalTables then
+                Html.text ""
+
+            else
+                let
+                    tableList =
+                        List.map
+                            (\tableName ->
+                                Html.li []
+                                    [ Html.button
+                                        [ onClick (RemoveAdditionalTable tableName)
+                                        , class "delete"
+                                        ]
+                                        []
+                                    , Html.text tableName
+                                    ]
+                            )
+                            model.additionalTables
+                in
+                Html.div [ class "field" ]
+                    [ Html.label
+                        [ class "label" ]
+                        [ Html.text "Additionals Table:" ]
+                    , Html.div [ class "control" ]
+                        [ Html.ul [] tableList
+                        ]
+                    ]
+
         tableOptions =
             Html.div [ class "columns" ]
                 [ Html.div [ class "column" ] [ tables ]
                 , Html.div [ class "column" ] [ links ]
                 , Html.div [ class "column" ] [ additionalTableOptions ]
+                , Html.div [ class "column" ] [ additionalTables ]
                 ]
 
         {-
@@ -626,28 +680,10 @@ view model =
 dataTable : List String -> List Data -> Html.Html msg
 dataTable columnNames data =
     let
-        viewValue value =
-            case value of
-                BoolValue val ->
-                    if val then
-                        "True"
-
-                    else
-                        "False"
-
-                IntValue val ->
-                    String.fromInt val
-
-                FloatValue val ->
-                    String.fromFloat val
-
-                StringValue val ->
-                    val
-
         mkRow rec =
             Html.tr []
                 (List.map
-                    (\val -> Html.td [] [ Html.text (viewValue val) ])
+                    (\val -> Html.td [] [ Html.text (viewValueType val) ])
                     (Dict.values rec)
                 )
 
@@ -657,7 +693,7 @@ dataTable columnNames data =
                     (\col ->
                         Html.td []
                             [ Html.text <|
-                                viewValue <|
+                                viewValueType <|
                                     Maybe.withDefault (StringValue "NA")
                                         (Dict.get col rec)
                             ]
@@ -673,9 +709,29 @@ dataTable columnNames data =
             [ Html.table [ class "table" ]
                 [ Html.thead []
                     (List.map (\col -> Html.th [] [ Html.text col ]) columnNames)
-                , Html.tbody [] (List.map mkRow data)
+                , Html.tbody [] (List.map mkRow2 data)
                 ]
             ]
+
+
+viewValueType : ValueType -> String
+viewValueType value =
+    case value of
+        BoolValue val ->
+            if val then
+                "True"
+
+            else
+                "False"
+
+        IntValue val ->
+            String.fromInt val
+
+        FloatValue val ->
+            String.fromFloat val
+
+        StringValue val ->
+            val
 
 
 commify : Int -> String
