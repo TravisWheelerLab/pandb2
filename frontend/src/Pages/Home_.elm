@@ -3,6 +3,8 @@ module Pages.Home_ exposing (Model, Msg, page)
 import Api
 import Dict exposing (Dict)
 import Effect exposing (Effect)
+import FormatNumber
+import FormatNumber.Locales exposing (Decimals(..), usLocale)
 import Html
 import Html.Attributes exposing (attribute, class, height, href, selected, src)
 import Html.Events exposing (onInput)
@@ -44,6 +46,28 @@ type alias Model =
     , additionalTableOptions : List String
     , additionalTables : List String
     , data : List Data
+    , dataColumns : List String
+    , recordCount : Maybe Int
+    , pageSize : Int
+    , pageNumber : Int
+    }
+
+
+initialModel : Model
+initialModel =
+    { tables = []
+    , dataDictionary = []
+    , errorMessage = Nothing
+    , primaryTable = ""
+    , linkOptions = []
+    , primaryTableLink = Nothing
+    , additionalTableOptions = []
+    , additionalTables = []
+    , data = []
+    , dataColumns = []
+    , recordCount = Nothing
+    , pageSize = 25
+    , pageNumber = 1
     }
 
 
@@ -76,6 +100,21 @@ type alias Data =
     Dict.Dict String ValueType
 
 
+type alias DataResult =
+    { results : List Data
+    , count : Int
+    , columns : List String
+    }
+
+
+decodeDataResult : Decoder DataResult
+decodeDataResult =
+    Decode.succeed DataResult
+        |> required "results" (list decodeData)
+        |> required "count" int
+        |> required "columns" (list string)
+
+
 decodeData : Decoder Data
 decodeData =
     Decode.dict decoderValueType
@@ -88,20 +127,6 @@ decodeDataDictionary =
         |> required "alias" string
         |> required "field_label" string
         |> optional "definition" (nullable string) Nothing
-
-
-initialModel : Model
-initialModel =
-    { tables = []
-    , dataDictionary = []
-    , errorMessage = Nothing
-    , primaryTable = ""
-    , linkOptions = []
-    , primaryTableLink = Nothing
-    , additionalTableOptions = []
-    , additionalTables = []
-    , data = []
-    }
 
 
 init : () -> ( Model, Effect Msg )
@@ -117,13 +142,15 @@ init () =
 
 type Msg
     = AddOtherTable String
-    | GotData (Result Http.Error (List Data))
+    | GotData (Result Http.Error DataResult)
     | GotDataDictionary (Result Http.Error (List DataDictionary))
     | RequestData
     | RequestDataDictionary
     | SetErrorMessage (Maybe String)
     | SetPrimaryTable String
     | SetPrimaryTableLink String
+    | UpdatePageNumber String
+    | UpdatePageSize String
 
 
 update : Shared.Model -> Msg -> Model -> ( Model, Effect Msg )
@@ -139,13 +166,19 @@ update shared msg model =
             )
 
         GotData (Ok result) ->
-            ( { model | data = result }
+            ( { model
+                | data = result.results
+                , dataColumns = result.columns
+                , recordCount = Just result.count
+              }
             , Effect.none
             )
 
         GotData (Err err) ->
             ( { model
                 | data = []
+                , dataColumns = []
+                , recordCount = Nothing
                 , errorMessage = Just (Api.toUserFriendlyMessage err)
               }
             , Effect.none
@@ -269,6 +302,41 @@ update shared msg model =
             , Effect.sendMsg RequestData
             )
 
+        UpdatePageSize newSize ->
+            case String.toInt newSize of
+                Just size ->
+                    let
+                        newModel =
+                            { model
+                                | pageSize = size
+                                , pageNumber = 1
+                            }
+                    in
+                    ( newModel
+                    , Effect.sendMsg RequestData
+                    )
+
+                Nothing ->
+                    ( { model | errorMessage = Just "Invalid page size" }
+                    , Effect.none
+                    )
+
+        UpdatePageNumber newNumber ->
+            case String.toInt newNumber of
+                Just pageNumber ->
+                    let
+                        newModel =
+                            { model | pageNumber = pageNumber }
+                    in
+                    ( newModel
+                    , Effect.sendMsg RequestData
+                    )
+
+                Nothing ->
+                    ( { model | errorMessage = Just "Invalid page number" }
+                    , Effect.none
+                    )
+
 
 requestData : Shared.Model -> Model -> Effect Msg
 requestData shared model =
@@ -279,13 +347,36 @@ requestData shared model =
                 model.dataDictionary
                 |> List.map .tableName
                 |> List.head
+
+        offset =
+            if model.pageNumber > 1 then
+                "&offset="
+                    ++ String.fromInt
+                        ((model.pageNumber
+                            - 1
+                         )
+                            * model.pageSize
+                        )
+
+            else
+                ""
+
+        limit =
+            "&limit="
+                ++ String.fromInt model.pageSize
     in
     case primaryTable of
         Just tableName ->
             Effect.sendCmd <|
                 Http.get
-                    { url = shared.apiHost ++ "/get/" ++ tableName
-                    , expect = Http.expectJson GotData (list decodeData)
+                    { url =
+                        shared.apiHost
+                            ++ "/get_data"
+                            ++ "?primary_table="
+                            ++ tableName
+                            ++ offset
+                            ++ limit
+                    , expect = Http.expectJson GotData decodeDataResult
                     }
 
         _ ->
@@ -319,6 +410,48 @@ view model =
     let
         blank =
             Html.option [] [ Html.text "-- Select --" ]
+
+        recordCount =
+            Maybe.withDefault 0 model.recordCount
+
+        numPages =
+            recordCount // model.pageSize
+
+        pageNav =
+            let
+                options =
+                    List.map
+                        (\num ->
+                            Html.option [ selected (num == model.pageNumber) ]
+                                [ Html.text (String.fromInt num) ]
+                        )
+                        (List.range
+                            1
+                            (numPages + 1)
+                        )
+            in
+            Html.div [ class "control" ]
+                [ Html.p [ class "heading" ] [ Html.text "Page:" ]
+                , Html.div []
+                    [ Html.select [ class "select", onInput UpdatePageNumber ] options ]
+                ]
+
+        pageSizeNav =
+            let
+                options =
+                    List.map
+                        (\num ->
+                            Html.option [ selected (model.pageSize == num) ]
+                                [ Html.text (String.fromInt num) ]
+                        )
+                        [ 10, 25, 50, 100 ]
+            in
+            Html.div [ class "control" ]
+                [ Html.p [ class "heading" ] [ Html.text "Show:" ]
+                , Html.div []
+                    [ Html.select [ class "select", onInput UpdatePageSize ] options
+                    ]
+                ]
 
         tables =
             let
@@ -397,6 +530,21 @@ view model =
                 , Html.div [ class "control" ] [ otherSelect ]
                 ]
 
+        numFound =
+            Html.div []
+                [ Html.p [ class "heading" ] [ Html.text "Found:" ]
+                , Html.p [ class "title" ] [ Html.text (commify recordCount) ]
+                ]
+
+        pagination =
+            Html.div [ class "container" ]
+                [ Html.nav [ class "level" ]
+                    [ Html.div [ class "level-item has-text-centered" ] [ numFound ]
+                    , Html.div [ class "level-item has-text-centered" ] [ pageSizeNav ]
+                    , Html.div [ class "level-item has-text-centered" ] [ pageNav ]
+                    ]
+                ]
+
         errorMessage =
             case model.errorMessage of
                 Just error ->
@@ -441,27 +589,26 @@ view model =
                 , Html.div [ class "column" ] [ additionalTableOptions ]
                 ]
 
-        info =
-            Html.div []
-                [ Html.div []
-                    [ Html.text <|
-                        "Primary table: "
-                            ++ model.primaryTable
-                    ]
-                , Html.div []
-                    [ Html.text <|
-                        "Primary table link: "
-                            ++ Maybe.withDefault "None" model.primaryTableLink
-                    ]
-                , Html.div []
-                    [ Html.text <|
-                        "Additional tables: "
-                            ++ String.join ", " model.additionalTables
-                    ]
-                ]
-
-        mkRow record =
-            Html.tr []
+        {-
+           info =
+               Html.div []
+                   [ Html.div []
+                       [ Html.text <|
+                           "Primary table: "
+                               ++ model.primaryTable
+                       ]
+                   , Html.div []
+                       [ Html.text <|
+                           "Primary table link: "
+                               ++ Maybe.withDefault "None" model.primaryTableLink
+                       ]
+                   , Html.div []
+                       [ Html.text <|
+                           "Additional tables: "
+                               ++ String.join ", " model.additionalTables
+                       ]
+                   ]
+        -}
     in
     { title = "PANdb"
     , body =
@@ -469,24 +616,16 @@ view model =
         , errorMessage
         , Html.div [ class "container" ]
             [ tableOptions
-            , info
-            , dataTable model.data
+            , pagination
+            , dataTable model.dataColumns model.data
             ]
         ]
     }
 
 
-dataTable : List Data -> Html.Html msg
-dataTable data =
+dataTable : List String -> List Data -> Html.Html msg
+dataTable columnNames data =
     let
-        columnNames =
-            case List.head data of
-                Just rec ->
-                    Dict.keys rec
-
-                _ ->
-                    []
-
         viewValue value =
             case value of
                 BoolValue val ->
@@ -511,6 +650,20 @@ dataTable data =
                     (\val -> Html.td [] [ Html.text (viewValue val) ])
                     (Dict.values rec)
                 )
+
+        mkRow2 rec =
+            Html.tr []
+                (List.map
+                    (\col ->
+                        Html.td []
+                            [ Html.text <|
+                                viewValue <|
+                                    Maybe.withDefault (StringValue "NA")
+                                        (Dict.get col rec)
+                            ]
+                    )
+                    columnNames
+                )
     in
     if List.isEmpty data then
         Html.text "No data"
@@ -523,3 +676,14 @@ dataTable data =
                 , Html.tbody [] (List.map mkRow data)
                 ]
             ]
+
+
+commify : Int -> String
+commify num =
+    let
+        locale =
+            { usLocale
+                | decimals = Exact 0
+            }
+    in
+    FormatNumber.format locale (toFloat num)

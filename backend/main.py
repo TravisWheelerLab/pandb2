@@ -1,4 +1,4 @@
-from typing import List, Optional  # Union
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -37,8 +37,9 @@ class DataDictionary(BaseModel):
     definition: Optional[str]
 
 
-class DataDictionaryResult(BaseModel):
-    data_dictionary: List[DataDictionary]
+class DataResult(BaseModel):
+    count: int
+    results: List[Dict[str, Any]]
     columns: List[str]
 
 
@@ -81,30 +82,74 @@ def get_tables() -> List[TableMeta]:
 
 
 # --------------------------------------------------
-@app.get("/get/{table_name}")
-def get(table_name: str):
-    sql = f"""
-        select *
-        from   {table_name}
-        limit  10
+@app.get("/get_data")
+def get(
+    primary_table: str,
+    additional_tables: Optional[str] = "",
+    join_col: Optional[str] = "",
+    limit: Optional[int] = 10,
+    offset: Optional[int] = 0,
+) -> DataResult:
+    column_sql = """
+        select  c.column_name,
+                c.column_name_alias as alias,
+                t.table_name
+        from    api_pandbcolumnmetadata c,
+                api_pandbtablemetadata t
+        where   c.is_visible=true
+        and     c.column_name!='pk'
+        and     c.table_id=t.id
+        and     t.table_name=%s
     """
 
-    res = []
+    count_sql = f"""
+        select count(*) as count
+        from   {primary_table}
+    """
+
+    records = []
+    columns = []
+    count = 0
     try:
         cur = get_cur()
-        cur.execute(sql)
-        res = cur.fetchall()
-    except Exception:
+
+        # Count the records
+        cur.execute(count_sql)
+        if res := cur.fetchone():
+            count = res[0]
+
+        # Find the column names/aliases
+        cur.execute(column_sql, (primary_table,))
+        select_cols = []
+        for name, alias, table_name in cur.fetchall():
+            if not alias:
+                alias = " ".join(map(str.capitalize, name.split("_")))
+            select_cols.append(f'{table_name}.{name} as "{alias}"')
+            columns.append(alias)
+
+        # Select the records
+        select_sql = f"""
+            select {", ".join(select_cols)}
+            from   {primary_table}
+            limit  {limit}
+            offset {offset}
+        """
+        print(select_sql)
+
+        cur.execute(select_sql)
+        records = list(map(dict, cur.fetchall()))
+    except Exception as e:
+        print(f"ERROR: {e}")
         dbh.rollback()
     finally:
         cur.close()
 
-    return list(map(dict, res))
+    return DataResult(results=records, count=count, columns=columns)
 
 
 # --------------------------------------------------
 @app.get("/get_data_dictionary")
-def get_data_dictionary() -> DataDictionaryResult:
+def get_data_dictionary() -> List[DataDictionary]:
     sql = """
         select d.table_name,
                m.table_name_alias as alias,
@@ -123,18 +168,14 @@ def get_data_dictionary() -> DataDictionaryResult:
         )
 
     res = []
-    columns = []
     try:
         cur = get_cur()
         cur.execute(sql)
         res = cur.fetchall()
-
-        if len(res) > 0:
-            columns = res[0].keys()
 
     except Exception:
         dbh.rollback()
     finally:
         cur.close()
 
-    return {"data_dictionary": list(map(f, res)), "columns": columns}
+    return list(map(f, res))
